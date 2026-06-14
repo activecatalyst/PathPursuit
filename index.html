@@ -227,6 +227,27 @@ const SECTORS = [
 
 const CATS = ['Account Management','Business Development','Customer Service','Data and Analytics','Design and UX','Engineering','Finance','Healthcare and Medicine','HR and Recruiting','Legal','Marketing and PR','Operations','Product','Project and Program Management','Sales','Science and Research'];
 const LEVELS = ['Entry Level','Mid Level','Senior Level','Director','VP'];
+// The Muse API's `category` query param returns zero results when set, so
+// category filtering is done client-side by matching each job's own
+// categories/tags against these keyword groups.
+const CATMAP = {
+  'Account Management': ['account management'],
+  'Business Development': ['business development','business operations'],
+  'Customer Service': ['customer service'],
+  'Data and Analytics': ['data','analytics'],
+  'Design and UX': ['design','ux','user experience'],
+  'Engineering': ['engineering'],
+  'Finance': ['finance','accounting'],
+  'Healthcare and Medicine': ['healthcare','medicine','medical'],
+  'HR and Recruiting': ['hr','human resources','recruiting','people'],
+  'Legal': ['legal'],
+  'Marketing and PR': ['marketing','pr','public relations','communications'],
+  'Operations': ['operations'],
+  'Product': ['product'],
+  'Project and Program Management': ['project management','program management'],
+  'Sales': ['sales'],
+  'Science and Research': ['science','research'],
+};
 
 const QS = [
   { q: 'What kind of work fits you best?', opts: [
@@ -319,28 +340,36 @@ async function doSearch(kw='', cat='', level='', page=1) {
   render();
 
   const params = { location:'San Diego, CA' };
-  if (cat)   params.category = cat;
-  if (level) params.level    = level;
+  if (level) params.level = level;
+  // Note: `category` is intentionally NOT sent to the API — passing it
+  // causes The Muse API to return zero results entirely. Category
+  // filtering happens client-side via CATMAP below.
 
   try {
     let results, totalPages;
-    if (kw.trim()) {
-      // Fetch 4 pages in parallel for keyword searches for better coverage
-      const pages = await Promise.all([0,1,2,3].map(i => fetchPage(params,i).catch(()=>({results:[],page_count:1}))));
+    if (kw.trim() || cat) {
+      // Fetch multiple pages in parallel for keyword/category searches for better coverage
+      const pages = await Promise.all([0,1,2,3,4,5].map(i => fetchPage(params,i).catch(()=>({results:[],page_count:1}))));
       totalPages = pages[0].page_count || 1;
-      const kl = kw.toLowerCase();
+      const kl = kw.trim().toLowerCase();
+      const catKws = cat ? (CATMAP[cat]||[cat.toLowerCase()]) : null;
       const all = pages.flatMap(p => p.results||[]);
       const seen = new Set();
       results = all.filter(j => {
         if (seen.has(j.id)) return false; seen.add(j.id);
-        return j.name.toLowerCase().includes(kl) || (j.company?.name||'').toLowerCase().includes(kl) || strip(j.contents||'').toLowerCase().includes(kl);
+        if (kl && !(j.name.toLowerCase().includes(kl) || (j.company?.name||'').toLowerCase().includes(kl) || strip(j.contents||'').toLowerCase().includes(kl))) return false;
+        if (catKws) {
+          const jc = (j.categories||[]).map(c=>c.name.toLowerCase());
+          if (!catKws.some(k => jc.some(c=>c.includes(k)))) return false;
+        }
+        return true;
       });
     } else {
       const data = await fetchPage(params, page-1);
       results = data.results||[];
       totalPages = data.page_count||1;
     }
-    S.results = results; S.totalPages = kw.trim() ? 1 : totalPages;
+    S.results = results; S.totalPages = (kw.trim()||cat) ? 1 : totalPages;
   } catch {
     S.results = null;
   }
