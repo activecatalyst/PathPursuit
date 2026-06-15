@@ -193,6 +193,7 @@ let S = {
   aiSugs: [], quizStep: 0, quizAns: {},
   results: undefined,      // undefined=unsearched, null=error, []=searched
   relaxedMatch: false,     // true when exact-phrase search was empty and we fell back to word-level matching
+  remoteCount: 0,          // number of results sourced from Remotive (remote roles)
   loading: false,
   page: 1, totalPages: 1,
   lastQ: { kw: '', cat: '', level: '' },
@@ -339,6 +340,31 @@ async function fetchPage(params, pageIdx) {
   return r.json();
 }
 
+// Second source: Remotive (free, no key, CORS-enabled, remote roles open to
+// any location). Only queried for keyword searches — normalized into the
+// same shape as Muse job objects so renderCard() works unchanged.
+async function fetchRemotive(kw) {
+  if (!kw.trim()) return [];
+  try {
+    const p = new URLSearchParams({ search: kw.trim(), limit: '20' });
+    const r = await fetch(`https://remotive.com/api/remote-jobs?${p}`);
+    if (!r.ok) return [];
+    const data = await r.json();
+    return (data.jobs||[]).map(j => ({
+      id: `remotive-${j.id}`,
+      name: j.title,
+      company: { name: j.company_name },
+      locations: [{ name: j.candidate_required_location || 'Remote' }],
+      categories: j.category ? [{ name: j.category }] : [],
+      levels: [],
+      contents: j.description||'',
+      refs: { landing_page: j.url },
+      publication_date: j.publication_date,
+      _source: 'remote',
+    }));
+  } catch { return []; }
+}
+
 async function doSearch(kw='', cat='', level='', page=1) {
   S.loading = true; S.page = page; S.lastQ = {kw,cat,level};
   if (S.view !== 'search') S.view = 'search';
@@ -352,9 +378,14 @@ async function doSearch(kw='', cat='', level='', page=1) {
 
   try {
     let results, totalPages;
+    S.remoteCount = 0;
     if (kw.trim() || cat) {
-      // Fetch multiple pages in parallel for keyword/category searches for better coverage
-      const pages = await Promise.all([0,1,2,3,4,5,6,7,8,9].map(i => fetchPage(params,i).catch(()=>({results:[],page_count:1}))));
+      // Fetch multiple pages in parallel for keyword/category searches for better coverage,
+      // plus a second source (Remotive, remote roles) when there's a keyword.
+      const [pages, remoteJobs] = await Promise.all([
+        Promise.all([0,1,2,3,4,5,6,7,8,9].map(i => fetchPage(params,i).catch(()=>({results:[],page_count:1})))),
+        fetchRemotive(kw),
+      ]);
       totalPages = pages[0].page_count || 1;
       const kl = kw.trim().toLowerCase();
       const catKws = cat ? (CATMAP[cat]||[cat.toLowerCase()]) : null;
@@ -396,11 +427,25 @@ async function doSearch(kw='', cat='', level='', page=1) {
           if (results.length > 0) S.relaxedMatch = true;
         }
       }
+
+      // Merge in Remotive results (optionally narrowed by the same category
+      // mapping used for Muse jobs), then sort everything newest-first.
+      let remote = remoteJobs;
+      if (catKws) {
+        remote = remote.filter(j => {
+          const jc = (j.categories||[]).map(c=>c.name.toLowerCase());
+          return catKws.some(k => jc.some(c=>c.includes(k)));
+        });
+      }
+      S.remoteCount = remote.length;
+      results = [...results, ...remote];
     } else {
       const data = await fetchPage(params, page-1);
       results = data.results||[];
       totalPages = data.page_count||1;
     }
+    // Newest posted first across all merged sources/pages.
+    results = results.slice().sort((a,b) => new Date(b.publication_date||0) - new Date(a.publication_date||0));
     S.results = results; S.totalPages = (kw.trim()||cat) ? 1 : totalPages;
   } catch {
     S.results = null;
@@ -632,7 +677,7 @@ function renderSearch() {
     const pageInfo = !kw && S.totalPages>1 ? `· Page ${S.page} of ${S.totalPages}` : '';
     body = `
       <div class="rbar">
-        <div class="rcount">${S.results.length} job${S.results.length!==1?'s':''} in ${esc(cityName())}${kw?` for "${esc(kw)}"`:''}  ${pageInfo}</div>
+        <div class="rcount">${S.results.length} job${S.results.length!==1?'s':''} in ${esc(cityName())}${kw?` for "${esc(kw)}"`:''}  ${pageInfo} · newest first${S.remoteCount?` (incl. ${S.remoteCount} remote)`:''}</div>
         ${S.relaxedMatch ? `<div class="hint">No exact matches for "${esc(kw)}" — showing closely related roles instead.</div>` : ''}
       </div>
       <div class="jlist">${S.results.map(j=>renderCard(j)).join('')}</div>
@@ -675,6 +720,7 @@ function renderCard(j) {
       <div class="jmeta">
         ${company?`<span class="jco">${esc(company)}</span><span class="jdot">·</span>`:''}
         <span>📍 ${esc(locs)}</span>
+        ${j._source==='remote'?`<span class="tag tag-l">🌐 Remote</span>`:''}
         ${levels.map(l=>`<span class="tag tag-l">${esc(l)}</span>`).join('')}
         ${cats.map(c=>`<span class="tag">${esc(c)}</span>`).join('')}
       </div>
