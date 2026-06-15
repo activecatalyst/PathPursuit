@@ -192,6 +192,7 @@ let S = {
   discMode: null,          // null | ai-loading | ai-results | quiz
   aiSugs: [], quizStep: 0, quizAns: {},
   results: undefined,      // undefined=unsearched, null=error, []=searched
+  relaxedMatch: false,     // true when exact-phrase search was empty and we fell back to word-level matching
   loading: false,
   page: 1, totalPages: 1,
   lastQ: { kw: '', cat: '', level: '' },
@@ -359,9 +360,11 @@ async function doSearch(kw='', cat='', level='', page=1) {
       const catKws = cat ? (CATMAP[cat]||[cat.toLowerCase()]) : null;
       const all = pages.flatMap(p => p.results||[]);
       const seen = new Set();
-      results = all.filter(j => {
-        if (seen.has(j.id)) return false; seen.add(j.id);
-        const kwMatch = kl ? (j.name.toLowerCase().includes(kl) || (j.company?.name||'').toLowerCase().includes(kl) || strip(j.contents||'').toLowerCase().includes(kl)) : null;
+      const uniq = all.filter(j => { if (seen.has(j.id)) return false; seen.add(j.id); return true; });
+      const matchKw = (j, s) => j.name.toLowerCase().includes(s) || (j.company?.name||'').toLowerCase().includes(s) || strip(j.contents||'').toLowerCase().includes(s);
+
+      results = uniq.filter(j => {
+        const kwMatch = kl ? matchKw(j, kl) : null;
         let catMatch = null;
         if (catKws) {
           const jc = (j.categories||[]).map(c=>c.name.toLowerCase());
@@ -375,6 +378,24 @@ async function doSearch(kw='', cat='', level='', page=1) {
         if (catMatch !== null) return catMatch;
         return true;
       });
+
+      // Fallback: a multi-word keyword phrase (e.g. "Operations Coordinator")
+      // often doesn't appear verbatim in any of the sampled listings even
+      // though closely related roles exist. If the exact-phrase search came
+      // back empty, retry matching on the individual significant words —
+      // first against job titles, then against titles/company/description.
+      S.relaxedMatch = false;
+      if (results.length === 0 && kl && kl.includes(' ')) {
+        const STOP = new Set(['and','or','the','of','for','a','an','to','in','on','at','with','&']);
+        const words = kl.split(/\s+/).filter(w => w.length > 2 && !STOP.has(w));
+        if (words.length) {
+          results = uniq.filter(j => words.some(w => j.name.toLowerCase().includes(w)));
+          if (results.length === 0) {
+            results = uniq.filter(j => words.some(w => matchKw(j, w)));
+          }
+          if (results.length > 0) S.relaxedMatch = true;
+        }
+      }
     } else {
       const data = await fetchPage(params, page-1);
       results = data.results||[];
@@ -612,6 +633,7 @@ function renderSearch() {
     body = `
       <div class="rbar">
         <div class="rcount">${S.results.length} job${S.results.length!==1?'s':''} in ${esc(cityName())}${kw?` for "${esc(kw)}"`:''}  ${pageInfo}</div>
+        ${S.relaxedMatch ? `<div class="hint">No exact matches for "${esc(kw)}" — showing closely related roles instead.</div>` : ''}
       </div>
       <div class="jlist">${S.results.map(j=>renderCard(j)).join('')}</div>
       ${!kw && S.totalPages>1 ? renderPagn(S.totalPages,S.page) : ''}`;
