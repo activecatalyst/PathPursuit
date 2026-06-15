@@ -208,7 +208,7 @@ function persS() { localStorage.setItem(KEYS.saved, JSON.stringify(S.savedJobs))
 /* ─── Utilities ──────────────────────────────────────────── */
 let _tt;
 function toast(m) { const el=document.getElementById('toast'); el.textContent=m; el.classList.add('on'); clearTimeout(_tt); _tt=setTimeout(()=>el.classList.remove('on'),2800); }
-function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function strip(h) { const d=document.createElement('div'); d.innerHTML=h; return d.textContent||''; }
 function ago(d) { if(!d) return ''; const s=(Date.now()-new Date(d))/1000; if(s<3600) return `${Math.floor(s/60)}m ago`; if(s<86400) return `${Math.floor(s/3600)}h ago`; if(s<2592e3) return `${Math.floor(s/86400)}d ago`; return `${Math.floor(s/2592e3)}mo ago`; }
 function isSaved(url) { return S.savedJobs.some(j=>j.url===url); }
@@ -221,7 +221,7 @@ const SECTORS = [
   { icon:'🏥', name:'Healthcare',             kw:'healthcare',         cat:'Healthcare and Medicine',  note:'UCSD Health · Scripps · Sharp' },
   { icon:'🏛️', name:'Government',            kw:'government',         cat:'Operations',               note:'City · County · Federal agencies' },
   { icon:'💰', name:'Finance & Banking',      kw:'finance',            cat:'Finance',                  note:'USAA · banks · financial services' },
-  { icon:'🎓', name:'Education',              kw:'teacher education',  cat:'',                         note:'UCSD · SDSU · K-12 · community colleges' },
+  { icon:'🎓', name:'Education',              kw:'university',         cat:'',                         note:'UCSD · SDSU · K-12 · community colleges' },
   { icon:'🌊', name:'Hospitality',            kw:'hospitality',        cat:'Customer Service',         note:'Hotels · tourism · restaurants' },
 ];
 
@@ -349,7 +349,7 @@ async function doSearch(kw='', cat='', level='', page=1) {
     let results, totalPages;
     if (kw.trim() || cat) {
       // Fetch multiple pages in parallel for keyword/category searches for better coverage
-      const pages = await Promise.all([0,1,2,3,4,5].map(i => fetchPage(params,i).catch(()=>({results:[],page_count:1}))));
+      const pages = await Promise.all([0,1,2,3,4,5,6,7,8,9].map(i => fetchPage(params,i).catch(()=>({results:[],page_count:1}))));
       totalPages = pages[0].page_count || 1;
       const kl = kw.trim().toLowerCase();
       const catKws = cat ? (CATMAP[cat]||[cat.toLowerCase()]) : null;
@@ -357,11 +357,18 @@ async function doSearch(kw='', cat='', level='', page=1) {
       const seen = new Set();
       results = all.filter(j => {
         if (seen.has(j.id)) return false; seen.add(j.id);
-        if (kl && !(j.name.toLowerCase().includes(kl) || (j.company?.name||'').toLowerCase().includes(kl) || strip(j.contents||'').toLowerCase().includes(kl))) return false;
+        const kwMatch = kl ? (j.name.toLowerCase().includes(kl) || (j.company?.name||'').toLowerCase().includes(kl) || strip(j.contents||'').toLowerCase().includes(kl)) : null;
+        let catMatch = null;
         if (catKws) {
           const jc = (j.categories||[]).map(c=>c.name.toLowerCase());
-          if (!catKws.some(k => jc.some(c=>c.includes(k)))) return false;
+          catMatch = catKws.some(k => jc.some(c=>c.includes(k)));
         }
+        // When both keyword and category are set, match either (AND was too
+        // restrictive against the sampled page set and often produced zero
+        // results even when relevant jobs existed).
+        if (kwMatch !== null && catMatch !== null) return kwMatch || catMatch;
+        if (kwMatch !== null) return kwMatch;
+        if (catMatch !== null) return catMatch;
         return true;
       });
     } else {
@@ -652,7 +659,7 @@ function renderCard(j) {
         <button class="btn btn-p btn-sm" data-analyze="${esc(url)}">Analyze in InFlow</button>
         ${saved
           ?`<span class="tag tag-l">Saved ✓</span>`
-          :`<button class="btn btn-g btn-sm" data-save='${JSON.stringify({title,company,url,desc:desc.slice(0,500)})}'>Save</button>`}
+          :`<button class="btn btn-g btn-sm" data-save='${esc(JSON.stringify({title,company,url,desc:desc.slice(0,500)}))}'>Save</button>`}
         ${date?`<span class="jdate">${date}</span>`:''}
       </div>
     </div>`;
