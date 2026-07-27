@@ -181,8 +181,187 @@
 <script>
 /* ─── Config ─────────────────────────────────────────────── */
 const INFLOW = 'https://activecatalyst.github.io/InFlow/';
-const KEYS = { resume: 'inflow_resume_v2', apiKey: 'inflow_api_key', proxy: 'inflow_proxy_url', saved: 'sdjobs_saved_v1', city: 'sdjobs_city_v1' };
+const KEYS = { resume: 'inflow_resume_v2', apiKey: 'inflow_api_key', proxy: 'inflow_proxy_url', city: 'sdjobs_city_v1' };
 const DEFAULT_CITY = 'San Diego, CA';
+
+/* ─── SHARED JOB CONTRACT (ac_jobs_v1) ───────────────────────
+   ONE shared job record under ONE key, read/written by BOTH apps in the suite
+   (Path Pursuit + InFlow). The body below is IDENTICAL to InFlow/src/acJobs.js —
+   keep them in sync.
+     • id is deterministic from url, so the same posting never double-saves.
+     • InFlow is the ONLY writer of `status` and `appliedAt`.
+     • Path Pursuit writes discovery fields + status:"saved" on first save and
+       never touches status again afterwards.
+     • Both apps read the full array, mutate by id, write the full array back. */
+const AC_JOBS_KEY       = "ac_jobs_v1";
+const AC_MIGRATED_KEY   = "ac_migrated_v1";
+const LEGACY_PP_KEY     = "sdjobs_saved_v1";
+const LEGACY_INFLOW_KEY = "inflow_jobs_v2";
+
+const AC_STATUSES = ["saved", "applied", "screen", "interview", "offer", "rejected"];
+const AC_STATUS_RANK = { saved: 0, applied: 1, screen: 2, interview: 3, offer: 4, rejected: 5 };
+const AC_STATUS_ALIAS = { interviewing: "interview", offered: "offer" };
+
+function acMapStatus(s) {
+  if (!s) return "saved";
+  const m = AC_STATUS_ALIAS[s] || s;
+  return AC_STATUSES.includes(m) ? m : "saved";
+}
+
+function acHash(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(36);
+}
+function acRandId() { return "j_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+
+function jobId(url) {
+  const u = (url || "").trim();
+  return u ? "u_" + acHash(u) : acRandId();
+}
+
+function acNow() { return new Date().toISOString(); }
+function acToIso(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return new Date(v).toISOString();
+  return v;
+}
+
+function makeJob(f) {
+  f = f || {};
+  const url = (f.url || "").trim();
+  return {
+    id:        f.id || jobId(url),
+    url,
+    title:     f.title   || "",
+    company:   f.company || "",
+    jd:        f.jd      || "",
+    source:    f.source  || "",
+    status:    acMapStatus(f.status || "saved"),
+    savedAt:   acToIso(f.savedAt) || acNow(),
+    appliedAt: acToIso(f.appliedAt),
+    analysis:  f.analysis != null ? f.analysis : null,
+    tailored:  f.tailored != null ? f.tailored : null,
+  };
+}
+
+function normalizeJob(o) {
+  o = o || {};
+  const url = (o.url || "").trim();
+  const rec = Object.assign({}, o, {
+    id:        url ? jobId(url) : (o.id || acRandId()),
+    url,
+    title:     o.title   || "",
+    company:   o.company || "",
+    jd:        o.jd != null ? o.jd : (o.jobDescription != null ? o.jobDescription : ""),
+    source:    o.source  || "",
+    status:    acMapStatus(o.status || "saved"),
+    savedAt:   acToIso(o.savedAt) || acToIso(o.dateSaved) || acToIso(o.dateAdded) || acNow(),
+    appliedAt: acToIso(o.appliedAt) || acToIso(o.dateApplied) || null,
+    analysis:  o.analysis != null ? o.analysis : null,
+    tailored:  o.tailored != null ? o.tailored : null,
+  });
+  delete rec.jobDescription;
+  return rec;
+}
+
+function acRead() {
+  try { const v = localStorage.getItem(AC_JOBS_KEY); const a = v ? JSON.parse(v) : []; return Array.isArray(a) ? a : []; }
+  catch { return []; }
+}
+function acWrite(arr) {
+  try { localStorage.setItem(AC_JOBS_KEY, JSON.stringify(arr)); return true; } catch { return false; }
+}
+
+function getJobs() { return acRead().map(normalizeJob); }
+function findJob(id) { return getJobs().find(j => j.id === id) || null; }
+
+function saveJob(record) {
+  const rec = normalizeJob(record);
+  const arr = acRead();
+  const i = arr.findIndex(j => normalizeJob(j).id === rec.id);
+  if (i === -1) {
+    arr.unshift(rec);
+  } else {
+    const cur = normalizeJob(arr[i]);
+    arr[i] = Object.assign({}, cur, {
+      title:   cur.title   || rec.title,
+      company: cur.company || rec.company,
+      jd:      cur.jd      || rec.jd,
+      source:  cur.source  || rec.source,
+    });
+  }
+  acWrite(arr);
+  return normalizeJob(arr[i === -1 ? 0 : i]);
+}
+
+function updateJob(id, patch) {
+  const arr = acRead();
+  const i = arr.findIndex(j => normalizeJob(j).id === id);
+  if (i === -1) return null;
+  arr[i] = normalizeJob(Object.assign({}, normalizeJob(arr[i]), patch));
+  acWrite(arr);
+  return arr[i];
+}
+
+function removeJob(id) {
+  acWrite(acRead().filter(j => normalizeJob(j).id !== id));
+}
+
+function ppLegacyToJob(o) {
+  o = o || {};
+  return makeJob({
+    url:     o.url || "",
+    title:   o.title || "",
+    company: o.company || "",
+    jd:      o.desc != null ? o.desc : (o.jd || ""),
+    source:  o.source || "path-pursuit",
+    status:  o.status || "saved",
+    savedAt: o.savedAt,
+  });
+}
+function inflowLegacyToJob(o) {
+  const rec = normalizeJob(o);
+  if (!rec.source) rec.source = "inflow";
+  return rec;
+}
+function acMergePrefer(a, b) {
+  const hi = (AC_STATUS_RANK[b.status] || 0) > (AC_STATUS_RANK[a.status] || 0) ? b : a;
+  const lo = hi === a ? b : a;
+  return Object.assign({}, lo, hi, {
+    title:    hi.title    || lo.title,
+    company:  hi.company  || lo.company,
+    jd:       hi.jd       || lo.jd,
+    source:   hi.source   || lo.source,
+    analysis: hi.analysis != null ? hi.analysis : lo.analysis,
+    tailored: hi.tailored != null ? hi.tailored : lo.tailored,
+  });
+}
+
+function migrateJobs() {
+  try {
+    if (localStorage.getItem(AC_MIGRATED_KEY) === "1") return;
+    let ok = true;
+    if (acRead().length === 0) {
+      const map = new Map();
+      const add = (rec) => { const cur = map.get(rec.id); map.set(rec.id, cur ? acMergePrefer(cur, rec) : rec); };
+      let inf = [], pp = [];
+      try { inf = JSON.parse(localStorage.getItem(LEGACY_INFLOW_KEY) || "[]"); } catch { inf = []; }
+      try { pp  = JSON.parse(localStorage.getItem(LEGACY_PP_KEY)     || "[]"); } catch { pp  = []; }
+      if (Array.isArray(inf)) inf.forEach(o => add(inflowLegacyToJob(o)));
+      if (Array.isArray(pp))  pp.forEach(o => add(ppLegacyToJob(o)));
+      if (map.size > 0) ok = acWrite(Array.from(map.values()));
+    }
+    if (ok) localStorage.setItem(AC_MIGRATED_KEY, "1");
+  } catch { /* leave unmigrated; will retry next load */ }
+}
+
+/* Canonical status → Path Pursuit display (read-only; InFlow owns status). */
+const AC_STATUS_LABEL = { saved:'Saved', applied:'Applied', screen:'Phone Screen', interview:'Interview', offer:'Offer', rejected:'Rejected' };
+const AC_BADGE_CLASS  = { saved:'sb-saved', applied:'sb-applied', screen:'sb-interviewing', interview:'sb-interviewing', offer:'sb-offered', rejected:'sb-rejected' };
 
 /* ─── State ──────────────────────────────────────────────── */
 let S = {
@@ -201,13 +380,14 @@ let S = {
 
 /* ─── Storage ────────────────────────────────────────────── */
 function loadStorage() {
+  migrateJobs();                               // one-time legacy → ac_jobs_v1 (guarded)
   S.resume  = localStorage.getItem(KEYS.resume)  || '';
   S.apiKey  = localStorage.getItem(KEYS.apiKey)  || '';
   S.city    = localStorage.getItem(KEYS.city)    || DEFAULT_CITY;
-  S.savedJobs = JSON.parse(localStorage.getItem(KEYS.saved) || '[]');
+  S.savedJobs = getJobs();                      // shared suite store
   S.view = S.resume.trim().length >= 50 ? 'discover' : 'setup';
 }
-function persS() { localStorage.setItem(KEYS.saved, JSON.stringify(S.savedJobs)); }
+function refreshSaved() { S.savedJobs = getJobs(); }
 
 /* ─── Utilities ──────────────────────────────────────────── */
 let _tt;
@@ -215,7 +395,7 @@ function toast(m) { const el=document.getElementById('toast'); el.textContent=m;
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function strip(h) { const d=document.createElement('div'); d.innerHTML=h; return d.textContent||''; }
 function ago(d) { if(!d) return ''; const s=(Date.now()-new Date(d))/1000; if(s<3600) return `${Math.floor(s/60)}m ago`; if(s<86400) return `${Math.floor(s/3600)}h ago`; if(s<2592e3) return `${Math.floor(s/86400)}d ago`; return `${Math.floor(s/2592e3)}mo ago`; }
-function isSaved(url) { return S.savedJobs.some(j=>j.url===url); }
+function isSaved(url) { const id = jobId((url||'').trim()); return S.savedJobs.some(j=>j.id===id); }
 // "San Diego, CA" -> "San Diego" (city name only, for use in headings/copy)
 function cityName() { return (S.city||DEFAULT_CITY).split(',')[0].trim() || 'your area'; }
 
@@ -454,14 +634,18 @@ async function doSearch(kw='', cat='', level='', page=1) {
   render();
 }
 
-/* ─── Saved Jobs ─────────────────────────────────────────── */
-function saveJob(j) {
-  if (isSaved(j.url)) { toast('Already saved!'); return; }
-  S.savedJobs.unshift({...j, savedAt:Date.now(), status:'saved'});
-  persS(); toast('Saved!'); render();
+/* ─── Saved Jobs ─────────────────────────────────────────────
+   Path Pursuit writes discovery fields + status:"saved" on first save via the
+   shared makeJob()/saveJob() upsert. Status now lives in InFlow — PP never
+   writes it again (no status dropdown here). */
+function saveFromCard(data) {
+  const id = jobId((data.url || '').trim());
+  if (findJob(id)) { toast('Already saved!'); refreshSaved(); render(); return; }
+  saveJob(makeJob({ url: data.url, title: data.title, company: data.company, jd: data.desc, source: data.source || '', status: 'saved' }));
+  refreshSaved(); toast('Saved!'); render();
 }
-function setStatus(url, status) { const j=S.savedJobs.find(j=>j.url===url); if(j){j.status=status;persS();render();} }
-function removeJob(url) { S.savedJobs=S.savedJobs.filter(j=>j.url!==url); persS(); toast('Removed'); render(); }
+function removeFromShared(id) { removeJob(id); refreshSaved(); toast('Removed'); render(); }
+function inflowLink(id) { return INFLOW + '?job=' + encodeURIComponent(id); }
 
 /* ─── Copy helpers ───────────────────────────────────────── */
 async function copyText(text, msg) { try { await navigator.clipboard.writeText(text); toast(msg); } catch { toast('Could not copy automatically.'); } }
@@ -482,6 +666,7 @@ function extLinks(kw='') {
 
 /* ─── Render ─────────────────────────────────────────────── */
 function render() {
+  refreshSaved();   // keep in sync with InFlow / other tabs (shared ac_jobs_v1)
   document.getElementById('app').innerHTML =
     S.view === 'setup' ? renderSetup() : renderShell() + renderMain();
   wire();
@@ -731,8 +916,9 @@ function renderCard(j) {
         ${desc?`<button class="btn btn-g btn-sm" data-copy-desc="${esc(desc.slice(0,3000))}">Copy Description</button>`:''}
         <button class="btn btn-p btn-sm" data-analyze="${esc(url)}">Analyze in InFlow</button>
         ${saved
-          ?`<span class="tag tag-l">Saved ✓</span>`
-          :`<button class="btn btn-g btn-sm" data-save='${esc(JSON.stringify({title,company,url,desc:desc.slice(0,500)}))}'>Save</button>`}
+          ?`<span class="tag tag-l">Saved ✓ · In InFlow</span>
+            <a href="${esc(inflowLink(jobId(url)))}" target="_blank" class="btn btn-g btn-sm">Open in InFlow ↗</a>`
+          :`<button class="btn btn-g btn-sm" data-save='${esc(JSON.stringify({title,company,url,desc:desc.slice(0,500),source:j._source==='remote'?'remotive':'the-muse'}))}'>Save</button>`}
         ${date?`<span class="jdate">${date}</span>`:''}
       </div>
     </div>`;
@@ -747,9 +933,13 @@ function renderPagn(total, cur) {
   return `<div class="pagn">${btns.join('')}</div>`;
 }
 
-/* ── Saved ── */
-const STATUS_OPTS = ['saved','applied','interviewing','offered','rejected'];
-function statusBadge(s) { return `<span class="sbadge sb-${s}">${s.charAt(0).toUpperCase()+s.slice(1)}</span>`; }
+/* ── Saved ──
+   Status is read-only here — it's set in InFlow and reflected back through the
+   shared ac_jobs_v1 store. Path Pursuit shows it and links across to InFlow. */
+function statusBadge(s) {
+  const k = acMapStatus(s);
+  return `<span class="sbadge ${AC_BADGE_CLASS[k]||'sb-saved'}">${AC_STATUS_LABEL[k]||'Saved'}</span>`;
+}
 
 function renderSaved() {
   if (!S.savedJobs.length) return `
@@ -762,18 +952,15 @@ function renderSaved() {
         <div class="sv-card">
           <div class="sv-top">
             <div class="sv-info">
-              <div class="sv-title">${esc(j.title)}</div>
-              <div class="sv-co">${esc(j.company)}${j.company?' · ':''}${statusBadge(j.status||'saved')}</div>
+              <div class="sv-title">${esc(j.title||'Untitled')}</div>
+              <div class="sv-co">${esc(j.company)}${j.company?' · ':''}${statusBadge(j.status)} <span class="tag tag-l">In InFlow</span></div>
             </div>
           </div>
           <div class="sv-act">
-            <a href="${esc(j.url)}" target="_blank" class="btn btn-g btn-sm">View ↗</a>
-            <button class="btn btn-g btn-sm" data-copy-url="${esc(j.url)}">📋 Copy URL</button>
-            <button class="btn btn-p btn-sm" data-analyze="${esc(j.url)}">Analyze in InFlow</button>
-            <select class="st-sel" data-status-url="${esc(j.url)}">
-              ${STATUS_OPTS.map(s=>`<option value="${s}" ${j.status===s?'selected':''}>${s.charAt(0).toUpperCase()+s.slice(1)}</option>`).join('')}
-            </select>
-            <button class="btn btn-r btn-sm" data-remove="${esc(j.url)}">Remove</button>
+            ${j.url?`<a href="${esc(j.url)}" target="_blank" class="btn btn-g btn-sm">View ↗</a>
+            <button class="btn btn-g btn-sm" data-copy-url="${esc(j.url)}">📋 Copy URL</button>`:''}
+            <a href="${esc(inflowLink(j.id))}" target="_blank" class="btn btn-p btn-sm">Open in InFlow ↗</a>
+            <button class="btn btn-r btn-sm" data-remove-id="${esc(j.id)}">Remove</button>
           </div>
         </div>`).join('')}
     </div>`;
@@ -889,12 +1076,11 @@ function wire() {
   $('[data-copy-desc]').forEach(el => el.addEventListener('click', () => copyText(el.dataset.copyDesc, 'Description copied! Paste into InFlow.')));
   $('[data-analyze]').forEach(el => el.addEventListener('click', () => analyzeInFlow(el.dataset.analyze)));
   $('[data-save]').forEach(el => el.addEventListener('click', () => {
-    try { saveJob(JSON.parse(el.dataset.save)); } catch {}
+    try { saveFromCard(JSON.parse(el.dataset.save)); } catch {}
   }));
 
-  /* Saved */
-  $('[data-status-url]').forEach(el => el.addEventListener('change', () => setStatus(el.dataset.statusUrl, el.value)));
-  $('[data-remove]').forEach(el => el.addEventListener('click', () => removeJob(el.dataset.remove)));
+  /* Saved (status is read-only — set in InFlow) */
+  $('[data-remove-id]').forEach(el => el.addEventListener('click', () => removeFromShared(el.dataset.removeId)));
 
   /* Settings */
   on('setCity','input', e => S.city=e.target.value);
@@ -910,7 +1096,7 @@ function wire() {
   on('setKey','input', e => S.apiKey=e.target.value);
   on('saveKey','click', () => { S.apiKey=(document.getElementById('setKey')?.value||'').trim(); localStorage.setItem(KEYS.apiKey,S.apiKey); toast('API key saved!'); render(); });
   on('clearKey','click', () => { S.apiKey=''; localStorage.removeItem(KEYS.apiKey); toast('Key cleared'); render(); });
-  on('clearSaved','click', () => { if(!confirm('Clear all saved jobs?')) return; S.savedJobs=[]; persS(); toast('Cleared'); render(); });
+  on('clearSaved','click', () => { if(!confirm('Clear all saved jobs? This clears the shared job store used by InFlow too.')) return; localStorage.setItem(AC_JOBS_KEY, '[]'); refreshSaved(); toast('Cleared'); render(); });
 }
 
 /* ─── Init ───────────────────────────────────────────────── */
